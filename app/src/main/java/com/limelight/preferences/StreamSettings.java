@@ -336,6 +336,24 @@ public class StreamSettings extends AppCompatActivity {
             addPreferencesFromResource(R.xml.preferences);
             PreferenceScreen screen = getPreferenceScreen();
 
+            CheckBoxPreference lowLatencyAudio = findPreference(
+                    PreferenceConfiguration.FORCE_ANDROID_LOW_LATENCY_PREF_STRING);
+            ListPreference audioBuffer = findPreference(
+                    PreferenceConfiguration.LOW_LATENCY_AUDIO_BUFFER_PREF_STRING);
+            Preference audioFx = findPreference("checkbox_enable_audiofx");
+            boolean supportsLowLatencyAudio = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O;
+            lowLatencyAudio.setVisible(supportsLowLatencyAudio);
+            audioBuffer.setVisible(supportsLowLatencyAudio);
+            audioFx.setEnabled(!supportsLowLatencyAudio || !lowLatencyAudio.isChecked());
+            lowLatencyAudio.setOnPreferenceChangeListener((preference, newValue) -> {
+                audioFx.setEnabled(!(Boolean) newValue);
+                return true;
+            });
+            audioBuffer.setSummaryProvider(preference -> {
+                ListPreference buffer = (ListPreference) preference;
+                return buffer.getEntry() + " — " + getString(R.string.summary_low_latency_audio_buffer);
+            });
+
             AppCompatActivity activity = (AppCompatActivity) requireActivity();
             PackageManager pm = activity.getPackageManager();
 

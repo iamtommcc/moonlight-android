@@ -2,27 +2,41 @@ package com.limelight.binding.audio;
 
 import android.content.Context;
 
+import java.util.concurrent.atomic.AtomicLong;
+
 import com.limelight.LimeLog;
 import com.limelight.nvstream.av.audio.AudioRenderer;
 import com.limelight.nvstream.jni.MoonBridge;
 
 public class LowLatencyAudioRenderer implements AudioRenderer {
-    // Some Android TV devices deny AudioTrack's fast path even when low-latency
-    // mode is requested. Prefer AAudio's callback path on Android O+ to avoid
-    // those device-specific AudioTrack latency spikes, then fall back if needed.
+    // AAudio is experimental and must be explicitly enabled. Keep AudioTrack
+    // as the default and as a fallback if AAudio setup fails.
     private final AndroidAudioRenderer audioTrackRenderer;
     private final boolean enableAudioFx;
-    private boolean useNativeAAudio;
+    private final boolean forceAndroidLowLatency;
+    private final int bufferMs;
+    private volatile boolean useNativeAAudio;
+    private final boolean diagnosticsEnabled;
+    private final AtomicLong backlogDroppedFrames = new AtomicLong();
+    private int channelCount;
+    private int sampleRate;
 
-    public LowLatencyAudioRenderer(Context context, boolean enableAudioFx) {
-        this.audioTrackRenderer = new AndroidAudioRenderer(context, enableAudioFx);
-        this.enableAudioFx = enableAudioFx;
+    public LowLatencyAudioRenderer(Context context, boolean enableAudioFx,
+                                   boolean forceAndroidLowLatency, int bufferMs, boolean diagnosticsEnabled) {
+        this.enableAudioFx = enableAudioFx && !forceAndroidLowLatency;
+        this.audioTrackRenderer = new AndroidAudioRenderer(context, this.enableAudioFx, diagnosticsEnabled);
+        this.forceAndroidLowLatency = forceAndroidLowLatency;
+        this.bufferMs = bufferMs;
+        this.diagnosticsEnabled = diagnosticsEnabled;
     }
 
     @Override
     public int setup(MoonBridge.AudioConfiguration audioConfiguration, int sampleRate, int samplesPerFrame) {
-        if (!enableAudioFx && NativeAAudioRenderer.isSupported()) {
-            int result = NativeAAudioRenderer.setup(audioConfiguration, sampleRate, samplesPerFrame);
+        this.channelCount = audioConfiguration.channelCount;
+        this.sampleRate = sampleRate;
+        backlogDroppedFrames.set(0);
+        if (forceAndroidLowLatency && NativeAAudioRenderer.isSupported()) {
+            int result = NativeAAudioRenderer.setup(audioConfiguration, sampleRate, samplesPerFrame, bufferMs, diagnosticsEnabled);
             if (result == 0) {
                 useNativeAAudio = true;
                 return 0;
@@ -61,6 +75,9 @@ public class LowLatencyAudioRenderer implements AudioRenderer {
     @Override
     public void playDecodedAudio(short[] audioData) {
         if (MoonBridge.getPendingAudioDuration() >= 40) {
+            if (diagnosticsEnabled && channelCount > 0) {
+                backlogDroppedFrames.addAndGet(audioData.length / channelCount);
+            }
             LimeLog.info("Too much pending audio data: " + MoonBridge.getPendingAudioDuration() + " ms");
             return;
         }
@@ -71,6 +88,14 @@ public class LowLatencyAudioRenderer implements AudioRenderer {
         else {
             audioTrackRenderer.playDecodedAudio(audioData);
         }
+    }
+
+    public AudioDiagnostics getDiagnostics() {
+        long backlogDrops = backlogDroppedFrames.get();
+        if (useNativeAAudio) {
+            return AudioDiagnostics.fromAAudio(NativeAAudioRenderer.getDiagnostics(), sampleRate, backlogDrops);
+        }
+        return audioTrackRenderer.getDiagnostics(backlogDrops);
     }
 
     @Override

@@ -225,6 +225,23 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     private TextView notificationOverlayView;
     private int requestedNotificationOverlayVisibility = View.GONE;
     private View performanceOverlayView;
+    private TextView audioDiagnosticsOverlay;
+    private LowLatencyAudioRenderer audioRenderer;
+    private final Handler audioDiagnosticsHandler = new Handler(Looper.getMainLooper());
+    private final Runnable updateAudioDiagnostics = new Runnable() {
+        @Override
+        public void run() {
+            if (!connected || !prefConfig.showAudioDiagnostics || isHidingOverlays) {
+                audioDiagnosticsOverlay.setVisibility(View.GONE);
+                return;
+            }
+            if (audioRenderer != null) {
+                audioDiagnosticsOverlay.setText(audioRenderer.getDiagnostics().format(Game.this));
+                audioDiagnosticsOverlay.setVisibility(View.VISIBLE);
+            }
+            audioDiagnosticsHandler.postDelayed(this, 500);
+        }
+    };
 
     private TextView performanceOverlayLite;
 
@@ -516,6 +533,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         }
 
         notificationOverlayView = findViewById(R.id.notificationOverlay);
+        audioDiagnosticsOverlay = findViewById(R.id.audioDiagnosticsOverlay);
 
         performanceOverlayView = findViewById(R.id.performanceOverlay);
 
@@ -873,8 +891,10 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                 decoderRenderer.setRenderTarget(streamContainer.getSurface());
 
                 // Starten Sie die NvConnection
-                conn.start(new LowLatencyAudioRenderer(Game.this, prefConfig.enableAudioFx),
-                        decoderRenderer, Game.this);
+                audioRenderer = new LowLatencyAudioRenderer(Game.this, prefConfig.enableAudioFx,
+                        prefConfig.forceAndroidLowLatency, prefConfig.lowLatencyAudioBufferMs,
+                        prefConfig.showAudioDiagnostics);
+                conn.start(audioRenderer, decoderRenderer, Game.this);
             }
         });
 
@@ -1236,6 +1256,8 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
                 hideGameMenu();
 
                 performanceOverlayView.setVisibility(View.GONE);
+                audioDiagnosticsHandler.removeCallbacks(updateAudioDiagnostics);
+                audioDiagnosticsOverlay.setVisibility(View.GONE);
                 notificationOverlayView.setVisibility(View.GONE);
 
                 // Disable sensors while in PiP mode
@@ -1271,6 +1293,10 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
                 if (prefConfig.enablePerfOverlay) {
                     performanceOverlayView.setVisibility(View.VISIBLE);
+                }
+
+                if (prefConfig.showAudioDiagnostics && connected) {
+                    audioDiagnosticsHandler.post(updateAudioDiagnostics);
                 }
 
                 notificationOverlayView.setVisibility(requestedNotificationOverlayVisibility);
@@ -1703,6 +1729,7 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
         super.onDestroy();
 
         instance = null;
+        audioDiagnosticsHandler.removeCallbacksAndMessages(null);
         timerHandler.removeCallbacksAndMessages(null);
 
         if (prefConfig.enableFullExDisplay) handleDisplayRemoved();
@@ -3437,6 +3464,10 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
     }
 
     private void stopConnection() {
+        audioDiagnosticsHandler.removeCallbacks(updateAudioDiagnostics);
+        runOnUiThread(() -> {
+            if (audioDiagnosticsOverlay != null) audioDiagnosticsOverlay.setVisibility(View.GONE);
+        });
         if (connecting || connected) {
             connecting = connected = false;
             updatePipAutoEnter();
@@ -3670,6 +3701,10 @@ public class Game extends AppCompatActivity implements SurfaceHolder.Callback,
 
                 connected = true;
                 connecting = false;
+                if (prefConfig.showAudioDiagnostics) {
+                    audioDiagnosticsHandler.removeCallbacks(updateAudioDiagnostics);
+                    audioDiagnosticsHandler.post(updateAudioDiagnostics);
+                }
                 updatePipAutoEnter();
 
                 // Hide the mouse cursor now after a short delay.

@@ -217,6 +217,19 @@
     <string name="title_audio_config_list">Surround sound configuration</string>
     <string name="summary_audio_config_list">Enable 5.1 or 7.1 surround sound for home-theater systems</string>
     <string name="title_checkbox_enable_audiofx">Enable system equalizer support</string>
+    <string name="title_force_android_low_latency">Force Android Low Latency (Experimental)</string>
+    <string name="summary_force_android_low_latency">May reduce audio delay. Bypasses system equalizer support. Reconnect the stream to apply.</string>
+    <string name="title_show_audio_diagnostics">Show audio diagnostics</string>
+    <string name="summary_show_audio_diagnostics">Show audio buffer occupancy and glitch counters during playback. Unavailable counters show N/A. Reconnect the stream to apply.</string>
+    <string name="audio_diagnostics_overlay">Audio: %1$s | queue: %2$s\nOutput buffer: %3$s | session totals\nDropped: %4$d PCM frames (backlog: %5$d)\nStarvation: %6$s | lock misses: %7$s\nHW/API underruns: %8$s | silence: %9$s</string>
+    <string name="audio_diagnostics_queue">%1$.1f / %2$.1f ms (%3$d%%)</string>
+    <string name="audio_diagnostics_duration">%1$.1f ms</string>
+    <string name="audio_diagnostics_starvation">%1$d (%2$d frames)</string>
+    <string name="audio_diagnostics_frames">%1$d frames</string>
+    <string name="audio_diagnostics_unavailable">N/A</string>
+    <string name="title_low_latency_audio_buffer">Low latency audio buffer</string>
+    <string name="summary_low_latency_audio_buffer">Larger buffers may reduce crackle but add delay. The device may adjust the selected duration. Reconnect the stream to apply.</string>
+    <string name="audio_buffer_default">Default</string>
     <string name="summary_checkbox_enable_audiofx">Allows audio effects to function while streaming, but may increase audio latency</string>
 
     <string name="category_gamepad_settings">Gamepad Settings</string>

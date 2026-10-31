@@ -236,6 +236,27 @@
             android:summary="@string/summary_checkbox_enable_audiofx"
             android:title="@string/title_checkbox_enable_audiofx"
             app:iconSpaceReserved="false" />
+        <CheckBoxPreference
+            android:defaultValue="false"
+            android:key="checkbox_force_android_low_latency"
+            android:summary="@string/summary_force_android_low_latency"
+            android:title="@string/title_force_android_low_latency"
+            app:iconSpaceReserved="false" />
+        <ListPreference
+            android:defaultValue="0"
+            android:dependency="checkbox_force_android_low_latency"
+            android:entries="@array/low_latency_audio_buffer_names"
+            android:entryValues="@array/low_latency_audio_buffer_values"
+            android:key="list_low_latency_audio_buffer_ms"
+            android:summary="@string/summary_low_latency_audio_buffer"
+            android:title="@string/title_low_latency_audio_buffer"
+            app:iconSpaceReserved="false" />
+        <CheckBoxPreference
+            android:defaultValue="false"
+            android:key="checkbox_show_audio_diagnostics"
+            android:summary="@string/summary_show_audio_diagnostics"
+            android:title="@string/title_show_audio_diagnostics"
+            app:iconSpaceReserved="false" />
     </PreferenceCategory>
 
     <PreferenceCategory

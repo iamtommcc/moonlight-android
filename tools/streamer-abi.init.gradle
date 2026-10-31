@@ -1,0 +1,10 @@
+allprojects {
+    plugins.withId('com.android.application') {
+        androidComponents.finalizeDsl { androidDsl ->
+            androidDsl.splits.abi.reset()
+            androidDsl.splits.abi.include('armeabi-v7a')
+            // Existing translated resources are missing their default strings.
+            androidDsl.lint.disable.add('ExtraTranslation')
+        }
+    }
+}

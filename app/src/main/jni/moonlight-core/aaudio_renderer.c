@@ -5,8 +5,11 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "spsc_audio_queue.h"
 
 #define LOG_TAG "MoonlightAAudio"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -42,6 +45,7 @@ typedef int32_t (*AAudioStream_getBufferSizeInFrames_fn)(AAudioStream* stream);
 typedef int32_t (*AAudioStream_setBufferSizeInFrames_fn)(AAudioStream* stream, int32_t numFrames);
 typedef aaudio_performance_mode_t (*AAudioStream_getPerformanceMode_fn)(AAudioStream* stream);
 typedef aaudio_sharing_mode_t (*AAudioStream_getSharingMode_fn)(AAudioStream* stream);
+typedef int32_t (*AAudioStream_getXRunCount_fn)(AAudioStream* stream);
 typedef const char* (*AAudio_convertResultToText_fn)(aaudio_result_t returnCode);
 
 static void* aaudioLib;
@@ -67,16 +71,34 @@ static AAudioStream_getBufferSizeInFrames_fn p_AAudioStream_getBufferSizeInFrame
 static AAudioStream_setBufferSizeInFrames_fn p_AAudioStream_setBufferSizeInFrames;
 static AAudioStream_getPerformanceMode_fn p_AAudioStream_getPerformanceMode;
 static AAudioStream_getSharingMode_fn p_AAudioStream_getSharingMode;
+static AAudioStream_getXRunCount_fn p_AAudioStream_getXRunCount;
 static AAudio_convertResultToText_fn p_AAudio_convertResultToText;
 
-static pthread_mutex_t streamMutex = PTHREAD_MUTEX_INITIALIZER;
+// This mutex protects producer/lifecycle access only. The realtime consumer
+// never acquires it, including while JNI copies or stop/close are in progress.
+static pthread_mutex_t writerMutex = PTHREAD_MUTEX_INITIALIZER;
 static AAudioStream* stream;
 static int channelCount;
-static int16_t* ringBuffer;
-static int ringCapacitySamples;
-static int ringReadIndex;
-static int ringWriteIndex;
-static int ringUsedSamples;
+static SpscAudioQueue audioQueue;
+
+// Only 32-bit, lock-free atomics in the realtime callback (including ARMv7).
+// Queue handoff itself only uses acquire/release loads and stores.
+_Static_assert(ATOMIC_INT_LOCK_FREE == 2, "Audio diagnostics require lock-free int atomics");
+static bool diagnosticsEnabled; // Immutable from open until the callback stream is closed.
+static atomic_uint diagnosticDroppedFrames;
+static atomic_uint diagnosticStarvationEvents;
+static atomic_uint diagnosticStarvationFrames;
+static atomic_uint diagnosticSilenceFrames;
+static int diagnosticCapacityFrames;
+static int diagnosticOutputBufferFrames;
+
+static void resetDiagnostics(void) {
+    atomic_store_explicit(&diagnosticDroppedFrames, 0, memory_order_relaxed);
+    atomic_store_explicit(&diagnosticStarvationEvents, 0, memory_order_relaxed);
+    atomic_store_explicit(&diagnosticStarvationFrames, 0, memory_order_relaxed);
+    atomic_store_explicit(&diagnosticSilenceFrames, 0, memory_order_relaxed);
+    diagnosticCapacityFrames = diagnosticOutputBufferFrames = 0;
+}
 
 static const char* resultText(aaudio_result_t result) {
     if (p_AAudio_convertResultToText != NULL) {
@@ -135,6 +157,7 @@ static bool loadAaudioSymbols(void) {
     LOAD_OPTIONAL(AAudioStreamBuilder_setContentType);
     LOAD_OPTIONAL(AAudioStream_getPerformanceMode);
     LOAD_OPTIONAL(AAudioStream_getSharingMode);
+    LOAD_OPTIONAL(AAudioStream_getXRunCount);
     LOAD_OPTIONAL(AAudio_convertResultToText);
 
 #undef LOAD_REQUIRED
@@ -148,51 +171,29 @@ static int maxInt(int a, int b) {
     return a > b ? a : b;
 }
 
-static int minInt(int a, int b) {
-    return a < b ? a : b;
-}
-
-static void clearRingLocked(void) {
-    ringReadIndex = 0;
-    ringWriteIndex = 0;
-    ringUsedSamples = 0;
-    if (ringBuffer != NULL) {
-        memset(ringBuffer, 0, (size_t)ringCapacitySamples * sizeof(*ringBuffer));
-    }
-}
-
-static void freeRingLocked(void) {
-    free(ringBuffer);
-    ringBuffer = NULL;
-    ringCapacitySamples = 0;
-    clearRingLocked();
+// Call only before starting, or after close has finished the callback thread.
+static void freeQueue(void) {
+    free(audioQueue.samples);
+    spscAudioQueueInit(&audioQueue, NULL, 0, 0);
 }
 
 static aaudio_data_callback_result_t dataCallback(AAudioStream* ignoredStream, void* userData, void* audioData, int32_t numFrames) {
     (void)ignoredStream;
     (void)userData;
+    if (numFrames <= 0) return AAUDIO_CALLBACK_RESULT_CONTINUE;
 
     int16_t* out = (int16_t*)audioData;
-    int requestedSamples = numFrames * channelCount;
-    int copiedSamples = 0;
-
-    if (pthread_mutex_trylock(&streamMutex) == 0) {
-        int samplesToCopy = minInt(requestedSamples, ringUsedSamples);
-        while (samplesToCopy > 0) {
-            int chunk = minInt(samplesToCopy, ringCapacitySamples - ringReadIndex);
-            memcpy(out + copiedSamples, ringBuffer + ringReadIndex, (size_t)chunk * sizeof(*out));
-            ringReadIndex = (ringReadIndex + chunk) % ringCapacitySamples;
-            ringUsedSamples -= chunk;
-            copiedSamples += chunk;
-            samplesToCopy -= chunk;
+    uint32_t copiedFrames = spscAudioQueueRead(&audioQueue, out, (uint32_t)numFrames);
+    uint32_t missingFrames = (uint32_t)numFrames - copiedFrames;
+    if (missingFrames > 0) {
+        memset(out + (size_t)copiedFrames * channelCount, 0,
+               (size_t)missingFrames * channelCount * sizeof(*out));
+        if (diagnosticsEnabled) {
+            atomic_fetch_add_explicit(&diagnosticStarvationEvents, 1, memory_order_relaxed);
+            atomic_fetch_add_explicit(&diagnosticStarvationFrames, missingFrames, memory_order_relaxed);
+            atomic_fetch_add_explicit(&diagnosticSilenceFrames, missingFrames, memory_order_relaxed);
         }
-        pthread_mutex_unlock(&streamMutex);
     }
-
-    if (copiedSamples < requestedSamples) {
-        memset(out + copiedSamples, 0, (size_t)(requestedSamples - copiedSamples) * sizeof(*out));
-    }
-
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
 
@@ -238,7 +239,7 @@ JNIEXPORT jboolean JNICALL Java_com_limelight_binding_audio_NativeAAudioRenderer
     return loadAaudioSymbols() ? JNI_TRUE : JNI_FALSE;
 }
 
-JNIEXPORT jint JNICALL Java_com_limelight_binding_audio_NativeAAudioRenderer_nativeSetup(JNIEnv* env, jclass clazz, jint requestedChannelCount, jint sampleRate, jint samplesPerFrame) {
+JNIEXPORT jint JNICALL Java_com_limelight_binding_audio_NativeAAudioRenderer_nativeSetup(JNIEnv* env, jclass clazz, jint requestedChannelCount, jint sampleRate, jint samplesPerFrame, jint bufferMs, jboolean enableDiagnostics) {
     (void)env;
     (void)clazz;
 
@@ -246,15 +247,17 @@ JNIEXPORT jint JNICALL Java_com_limelight_binding_audio_NativeAAudioRenderer_nat
         return -1;
     }
 
-    pthread_mutex_lock(&streamMutex);
+    pthread_mutex_lock(&writerMutex);
     if (stream != NULL) {
         p_AAudioStream_requestStop(stream);
         p_AAudioStream_close(stream);
         stream = NULL;
     }
-    freeRingLocked();
+    freeQueue();
     channelCount = requestedChannelCount;
-    pthread_mutex_unlock(&streamMutex);
+    diagnosticsEnabled = enableDiagnostics == JNI_TRUE;
+    resetDiagnostics();
+    pthread_mutex_unlock(&writerMutex);
 
     aaudio_result_t result = openAaudioStream(requestedChannelCount, sampleRate, AAUDIO_SHARING_MODE_EXCLUSIVE);
     if (result != AAUDIO_OK) {
@@ -266,30 +269,44 @@ JNIEXPORT jint JNICALL Java_com_limelight_binding_audio_NativeAAudioRenderer_nat
 
     int burstFrames = p_AAudioStream_getFramesPerBurst(stream);
     int targetBufferFrames = maxInt(burstFrames * 2, samplesPerFrame * 2);
+    if (bufferMs >= 8 && bufferMs <= 64) {
+        // Round the requested duration up to whole device bursts. Retain at
+        // least two bursts; Android may further clamp to the stream capacity.
+        int requestedFrames = (sampleRate * bufferMs + 999) / 1000;
+        if (burstFrames > 0) {
+            requestedFrames = ((requestedFrames + burstFrames - 1) / burstFrames) * burstFrames;
+        }
+        targetBufferFrames = maxInt(burstFrames * 2, requestedFrames);
+    }
     int actualBufferFrames = p_AAudioStream_setBufferSizeInFrames(stream, targetBufferFrames);
     int capacityFrames = p_AAudioStream_getBufferCapacityInFrames(stream);
     int bufferFrames = p_AAudioStream_getBufferSizeInFrames(stream);
-    int ringCapacityFrames = maxInt(samplesPerFrame * 6, maxInt(burstFrames * 4, targetBufferFrames * 2));
+    // Match software queue capacity to the actual accepted playback buffer.
+    // The default remains identical to the original renderer calculation.
+    int ringBufferFrames = bufferMs >= 8 && bufferMs <= 64 && bufferFrames > 0
+            ? bufferFrames : targetBufferFrames;
+    int ringCapacityFrames = maxInt(samplesPerFrame * 6, maxInt(burstFrames * 4, ringBufferFrames * 2));
+    diagnosticCapacityFrames = ringCapacityFrames;
+    diagnosticOutputBufferFrames = bufferFrames;
 
-    pthread_mutex_lock(&streamMutex);
-    ringCapacitySamples = ringCapacityFrames * channelCount;
-    ringBuffer = (int16_t*)calloc((size_t)ringCapacitySamples, sizeof(*ringBuffer));
-    clearRingLocked();
-    pthread_mutex_unlock(&streamMutex);
+    pthread_mutex_lock(&writerMutex);
+    int16_t* storage = (int16_t*)calloc((size_t)ringCapacityFrames * channelCount, sizeof(*storage));
+    spscAudioQueueInit(&audioQueue, storage, ringCapacityFrames, channelCount);
+    pthread_mutex_unlock(&writerMutex);
 
-    if (ringBuffer == NULL) {
+    if (audioQueue.samples == NULL) {
         LOGE("Failed to allocate AAudio ring buffer");
-        pthread_mutex_lock(&streamMutex);
+        pthread_mutex_lock(&writerMutex);
         p_AAudioStream_close(stream);
         stream = NULL;
-        pthread_mutex_unlock(&streamMutex);
+        pthread_mutex_unlock(&writerMutex);
         return -3;
     }
 
     int performanceMode = p_AAudioStream_getPerformanceMode != NULL ? p_AAudioStream_getPerformanceMode(stream) : -1;
     int sharingMode = p_AAudioStream_getSharingMode != NULL ? p_AAudioStream_getSharingMode(stream) : -1;
-    LOGI("AAudio config: channels=%d sampleRate=%d packetFrames=%d burst=%d targetBuffer=%d actualSet=%d buffer=%d capacity=%d ringFrames=%d perf=%d sharing=%d",
-         requestedChannelCount, sampleRate, samplesPerFrame, burstFrames, targetBufferFrames,
+    LOGI("AAudio lock-free config: channels=%d sampleRate=%d packetFrames=%d burst=%d requestedMs=%d targetBuffer=%d actualSet=%d buffer=%d capacity=%d ringFrames=%d perf=%d sharing=%d",
+         requestedChannelCount, sampleRate, samplesPerFrame, burstFrames, bufferMs, targetBufferFrames,
          actualBufferFrames, bufferFrames, capacityFrames, ringCapacityFrames, performanceMode, sharingMode);
 
     return 0;
@@ -299,10 +316,9 @@ JNIEXPORT void JNICALL Java_com_limelight_binding_audio_NativeAAudioRenderer_nat
     (void)env;
     (void)clazz;
 
-    pthread_mutex_lock(&streamMutex);
-    clearRingLocked();
+    pthread_mutex_lock(&writerMutex);
     AAudioStream* localStream = stream;
-    pthread_mutex_unlock(&streamMutex);
+    pthread_mutex_unlock(&writerMutex);
 
     if (localStream != NULL) {
         aaudio_result_t result = p_AAudioStream_requestStart(localStream);
@@ -316,10 +332,9 @@ JNIEXPORT void JNICALL Java_com_limelight_binding_audio_NativeAAudioRenderer_nat
     (void)env;
     (void)clazz;
 
-    pthread_mutex_lock(&streamMutex);
+    pthread_mutex_lock(&writerMutex);
     AAudioStream* localStream = stream;
-    clearRingLocked();
-    pthread_mutex_unlock(&streamMutex);
+    pthread_mutex_unlock(&writerMutex);
 
     if (localStream != NULL) {
         p_AAudioStream_requestStop(localStream);
@@ -344,50 +359,64 @@ JNIEXPORT void JNICALL Java_com_limelight_binding_audio_NativeAAudioRenderer_nat
         return;
     }
 
-    pthread_mutex_lock(&streamMutex);
-    if (ringBuffer != NULL && ringCapacitySamples > 0) {
-        int inputOffset = 0;
-        int samplesToWrite = sampleCount;
-
-        if (samplesToWrite > ringCapacitySamples) {
-            inputOffset = samplesToWrite - ringCapacitySamples;
-            samplesToWrite = ringCapacitySamples;
-        }
-
-        int freeSamples = ringCapacitySamples - ringUsedSamples;
-        if (samplesToWrite > freeSamples) {
-            int samplesToDrop = samplesToWrite - freeSamples;
-            ringReadIndex = (ringReadIndex + samplesToDrop) % ringCapacitySamples;
-            ringUsedSamples -= samplesToDrop;
-            LOGW("AAudio ring full; dropped %d samples to avoid latency growth", samplesToDrop);
-        }
-
-        while (samplesToWrite > 0) {
-            int chunk = minInt(samplesToWrite, ringCapacitySamples - ringWriteIndex);
-            memcpy(ringBuffer + ringWriteIndex, samples + inputOffset, (size_t)chunk * sizeof(*ringBuffer));
-            ringWriteIndex = (ringWriteIndex + chunk) % ringCapacitySamples;
-            ringUsedSamples += chunk;
-            inputOffset += chunk;
-            samplesToWrite -= chunk;
+    pthread_mutex_lock(&writerMutex);
+    uint32_t droppedFrames = 0;
+    if (audioQueue.samples != NULL && channelCount > 0) {
+        uint32_t frames = (uint32_t)sampleCount / channelCount;
+        uint32_t accepted = spscAudioQueueWrite(&audioQueue, samples, frames);
+        droppedFrames = frames - accepted;
+        // A full SPSC queue rejects incoming excess. The producer must never
+        // advance the consumer's read cursor or overwrite frames being copied.
+        // Capacity remains bounded by exactly the previous ring calculation.
+        if (diagnosticsEnabled && droppedFrames > 0) {
+            atomic_fetch_add_explicit(&diagnosticDroppedFrames, droppedFrames, memory_order_relaxed);
         }
     }
-    pthread_mutex_unlock(&streamMutex);
+    pthread_mutex_unlock(&writerMutex);
 
     (*env)->ReleaseShortArrayElements(env, audioData, samples, JNI_ABORT);
+    if (droppedFrames > 0) {
+        LOGW("AAudio queue full; dropped %u incoming PCM frames", droppedFrames);
+    }
+}
+
+JNIEXPORT jlongArray JNICALL Java_com_limelight_binding_audio_NativeAAudioRenderer_nativeGetDiagnostics(JNIEnv* env, jclass clazz) {
+    (void)clazz;
+    // Java serializes this call with setup/start/stop/cleanup, keeping stream
+    // alive without contending with the callback or the audio producer.
+    if (stream == NULL || !diagnosticsEnabled) {
+        return NULL;
+    }
+    jlong values[] = {
+        spscAudioQueueOccupancy(&audioQueue),
+        diagnosticCapacityFrames,
+        diagnosticOutputBufferFrames,
+        atomic_load_explicit(&diagnosticDroppedFrames, memory_order_relaxed),
+        atomic_load_explicit(&diagnosticStarvationEvents, memory_order_relaxed),
+        atomic_load_explicit(&diagnosticStarvationFrames, memory_order_relaxed),
+        -1, // No callback mutex exists; lock misses are not applicable.
+        p_AAudioStream_getXRunCount != NULL ? p_AAudioStream_getXRunCount(stream) : -1,
+        atomic_load_explicit(&diagnosticSilenceFrames, memory_order_relaxed),
+    };
+    jlongArray result = (*env)->NewLongArray(env, sizeof(values) / sizeof(values[0]));
+    if (result != NULL) {
+        (*env)->SetLongArrayRegion(env, result, 0, sizeof(values) / sizeof(values[0]), values);
+    }
+    return result;
 }
 
 JNIEXPORT void JNICALL Java_com_limelight_binding_audio_NativeAAudioRenderer_nativeCleanup(JNIEnv* env, jclass clazz) {
     (void)env;
     (void)clazz;
 
-    pthread_mutex_lock(&streamMutex);
+    pthread_mutex_lock(&writerMutex);
     AAudioStream* localStream = stream;
     stream = NULL;
-    freeRingLocked();
-    pthread_mutex_unlock(&streamMutex);
-
     if (localStream != NULL) {
         p_AAudioStream_requestStop(localStream);
         p_AAudioStream_close(localStream);
     }
+    // close() must complete before freeing storage used by the callback.
+    freeQueue();
+    pthread_mutex_unlock(&writerMutex);
 }

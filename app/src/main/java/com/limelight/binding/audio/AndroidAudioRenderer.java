@@ -9,6 +9,8 @@ import android.media.AudioTrack;
 import android.media.audiofx.AudioEffect;
 import android.os.Build;
 
+import java.util.concurrent.atomic.AtomicLong;
+
 import com.limelight.LimeLog;
 import com.limelight.nvstream.av.audio.AudioRenderer;
 import com.limelight.nvstream.jni.MoonBridge;
@@ -19,10 +21,17 @@ public class AndroidAudioRenderer implements AudioRenderer {
     private final boolean enableAudioFx;
 
     private AudioTrack track;
+    private final boolean diagnosticsEnabled;
+    private final AtomicLong writtenFrames = new AtomicLong();
+    private final AtomicLong droppedFrames = new AtomicLong();
+    private int diagnosticChannelCount;
+    private int diagnosticSampleRate;
+    private int diagnosticBufferFrames;
 
-    public AndroidAudioRenderer(Context context, boolean enableAudioFx) {
+    public AndroidAudioRenderer(Context context, boolean enableAudioFx, boolean diagnosticsEnabled) {
         this.context = context;
         this.enableAudioFx = enableAudioFx;
+        this.diagnosticsEnabled = diagnosticsEnabled;
     }
 
     private AudioTrack createAudioTrack(int channelConfig, int sampleRate, int bufferSize, boolean lowLatency) {
@@ -65,7 +74,11 @@ public class AndroidAudioRenderer implements AudioRenderer {
     }
 
     @Override
-    public int setup(MoonBridge.AudioConfiguration audioConfiguration, int sampleRate, int samplesPerFrame) {
+    public synchronized int setup(MoonBridge.AudioConfiguration audioConfiguration, int sampleRate, int samplesPerFrame) {
+        diagnosticChannelCount = audioConfiguration.channelCount;
+        diagnosticSampleRate = sampleRate;
+        writtenFrames.set(0);
+        droppedFrames.set(0);
         int channelConfig;
         int bytesPerFrame;
 
@@ -161,6 +174,8 @@ public class AndroidAudioRenderer implements AudioRenderer {
             try {
                 track = createAudioTrack(channelConfig, sampleRate, bufferSize, lowLatency);
                 track.play();
+                diagnosticBufferFrames = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+                        ? track.getBufferSizeInFrames() : bufferSize / bytesPerFrame;
 
                 // Successfully created working AudioTrack. We're done here.
                 LimeLog.info("Audio track configuration: "+bufferSize+" "+lowLatency);
@@ -192,9 +207,16 @@ public class AndroidAudioRenderer implements AudioRenderer {
             // This will block until the write is completed. That can cause a backlog
             // of pending audio data, so we do the above check to be able to bound
             // latency at 40 ms in that situation.
-            track.write(audioData, 0, audioData.length);
+            int written = track.write(audioData, 0, audioData.length);
+            if (diagnosticsEnabled) {
+                writtenFrames.addAndGet(Math.max(0, written) / diagnosticChannelCount);
+                droppedFrames.addAndGet((audioData.length - Math.max(0, written)) / diagnosticChannelCount);
+            }
         }
         else {
+            if (diagnosticsEnabled) {
+                droppedFrames.addAndGet(audioData.length / diagnosticChannelCount);
+            }
             LimeLog.info("Too much pending audio data: " + MoonBridge.getPendingAudioDuration() +" ms");
         }
     }
@@ -222,12 +244,27 @@ public class AndroidAudioRenderer implements AudioRenderer {
         }
     }
 
+    public synchronized AudioDiagnostics getDiagnostics(long backlogDrops) {
+        if (track == null || !diagnosticsEnabled) {
+            return AudioDiagnostics.unavailable("AudioTrack", diagnosticSampleRate, backlogDrops);
+        }
+        // Approximate occupancy: a blocking write may still be in flight. Treat
+        // the 32-bit playback head as unsigned, including its periodic wrap.
+        long queued = (writtenFrames.get() - (track.getPlaybackHeadPosition() & 0xffffffffL)) & 0xffffffffL;
+        queued = Math.min(diagnosticBufferFrames, queued > 0x7fffffffL ? 0 : queued);
+        long underruns = Build.VERSION.SDK_INT >= Build.VERSION_CODES.N ? track.getUnderrunCount() : -1;
+        return new AudioDiagnostics("AudioTrack (~queue)", diagnosticSampleRate, queued,
+                diagnosticBufferFrames, diagnosticBufferFrames, droppedFrames.get() + backlogDrops,
+                backlogDrops, -1, -1, -1, underruns, -1);
+    }
+
     @Override
-    public void cleanup() {
+    public synchronized void cleanup() {
         // Immediately drop all pending data
         track.pause();
         track.flush();
 
         track.release();
+        track = null;
     }
 }

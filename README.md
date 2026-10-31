@@ -2,6 +2,17 @@
 
 Previously named Moonlight Noir
 
+## Experimental audio build
+
+This personal fork includes [olibols's native AAudio renderer (Artemis PR #567)](https://github.com/ClassicOldSong/moonlight-android/pull/567),
+an opt-in low latency setting, buffer controls, playback audio diagnostics, and a
+lock-free PCM queue to remove silence caused by callback mutex contention.
+The Google TV Streamer test reported no audible crackle and zero dropped PCM
+frames after five minutes with the existing buffer settings; some starvation
+silence remained. This is one device report, not general compatibility validation.
+
+See [audio changes, testing, and build instructions](docs/audio-latency.md).
+
 An open source client for [Apollo](https://github.com/ClassicOldSong/Apollo)/[Sunshine](https://github.com/LizardByte/Sunshine).
 
 Artemis Android will allow you to stream your collection of games from your Windows PC to your Android device,
@@ -46,7 +57,7 @@ If you switch back to the main stream version, you'll be missing the following a
 29. Server Command integration with [Apollo](https://github.com/ClassicOldSong/Apollo)
 30. Clipboard sync (requires Apollo)
 31. SBS 3D for external Displays (Using AI MiDaS v2 Lite)
-32. Native AAudio low-latency audio renderer on Android O+ when system audio effects are disabled, with AudioTrack fallback.
+32. Opt-in native AAudio low-latency audio renderer on Android O+, with AudioTrack fallback, buffer controls and audio diagnostics.
 
 # Disclaimer
 

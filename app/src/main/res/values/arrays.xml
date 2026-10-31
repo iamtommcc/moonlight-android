@@ -48,6 +48,26 @@
         <item>@string/audioconf_51surround</item>
         <item>@string/audioconf_71surround</item>
     </string-array>
+    <string-array name="low_latency_audio_buffer_names">
+        <item>@string/audio_buffer_default</item>
+        <item>8 ms</item>
+        <item>12 ms</item>
+        <item>16 ms</item>
+        <item>24 ms</item>
+        <item>32 ms</item>
+        <item>48 ms</item>
+        <item>64 ms</item>
+    </string-array>
+    <string-array name="low_latency_audio_buffer_values" translatable="false">
+        <item>0</item>
+        <item>8</item>
+        <item>12</item>
+        <item>16</item>
+        <item>24</item>
+        <item>32</item>
+        <item>48</item>
+        <item>64</item>
+    </string-array>
     <string-array name="audio_config_values" translatable="false">
         <item>2</item>
         <item>51</item>

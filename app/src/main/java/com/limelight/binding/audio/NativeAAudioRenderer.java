@@ -14,23 +14,23 @@ final class NativeAAudioRenderer {
         return SUPPORTED;
     }
 
-    static int setup(MoonBridge.AudioConfiguration audioConfiguration, int sampleRate, int samplesPerFrame) {
+    static synchronized int setup(MoonBridge.AudioConfiguration audioConfiguration, int sampleRate, int samplesPerFrame, int bufferMs, boolean diagnosticsEnabled) {
         if (!SUPPORTED) {
             return -1;
         }
 
-        int result = nativeSetup(audioConfiguration.channelCount, sampleRate, samplesPerFrame);
+        int result = nativeSetup(audioConfiguration.channelCount, sampleRate, samplesPerFrame, bufferMs, diagnosticsEnabled);
         if (result == 0) {
             LimeLog.info("Using native AAudio renderer for low-latency audio");
         }
         return result;
     }
 
-    static void start() {
+    static synchronized void start() {
         nativeStart();
     }
 
-    static void stop() {
+    static synchronized void stop() {
         nativeStop();
     }
 
@@ -38,12 +38,18 @@ final class NativeAAudioRenderer {
         nativeWrite(audioData, audioData.length);
     }
 
-    static void cleanup() {
+    static synchronized void cleanup() {
         nativeCleanup();
     }
 
+    // Serialize polling with stream lifecycle, never with the realtime callback.
+    static synchronized long[] getDiagnostics() {
+        return nativeGetDiagnostics();
+    }
+
+    private static native long[] nativeGetDiagnostics();
     private static native boolean nativeIsSupported();
-    private static native int nativeSetup(int channelCount, int sampleRate, int samplesPerFrame);
+    private static native int nativeSetup(int channelCount, int sampleRate, int samplesPerFrame, int bufferMs, boolean diagnosticsEnabled);
     private static native void nativeStart();
     private static native void nativeStop();
     private static native void nativeWrite(short[] audioData, int sampleCount);

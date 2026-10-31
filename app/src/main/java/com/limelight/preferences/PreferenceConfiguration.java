@@ -87,6 +87,9 @@ public class PreferenceConfiguration {
     private static final String LOW_LATENCY_FRAME_BALANCE_PREF_STRING = "pref_low_latency_frame_balance";
     private static final String ABSOLUTE_MOUSE_MODE_PREF_STRING = "checkbox_absolute_mouse_mode";
     private static final String ENABLE_AUDIO_FX_PREF_STRING = "checkbox_enable_audiofx";
+    public static final String FORCE_ANDROID_LOW_LATENCY_PREF_STRING = "checkbox_force_android_low_latency";
+    public static final String SHOW_AUDIO_DIAGNOSTICS_PREF_STRING = "checkbox_show_audio_diagnostics";
+    public static final String LOW_LATENCY_AUDIO_BUFFER_PREF_STRING = "list_low_latency_audio_buffer_ms";
     private static final String REDUCE_REFRESH_RATE_PREF_STRING = "checkbox_reduce_refresh_rate";
     private static final String FULL_RANGE_PREF_STRING = "checkbox_full_range";
     private static final String GAMEPAD_TOUCHPAD_AS_MOUSE_PREF_STRING = "checkbox_gamepad_touchpad_as_mouse";
@@ -368,6 +371,10 @@ public class PreferenceConfiguration {
     public int framePacing;
     public boolean absoluteMouseMode;
     public boolean enableAudioFx;
+    public boolean forceAndroidLowLatency;
+    public boolean showAudioDiagnostics;
+    // Zero preserves the renderer's device-dependent default.
+    public int lowLatencyAudioBufferMs;
     public boolean reduceRefreshRate;
     public boolean fullRange;
     public boolean gamepadMotionSensors;
@@ -1012,7 +1019,21 @@ private static int getFramePacingValue(Context context) {
         config.smartClipboardSyncToast = prefs.getBoolean(CHECKBOX_SMART_CLIPBOARD_SYNC_TOAST, DEFAULT_SMART_CLIPBOARD_SYNC_TOAST);
         config.hideClipboardContent = prefs.getBoolean(CHECKBOX_HIDE_CLIPBOARD_CONTENT, DEFAULT_HIDE_CLIPBOARD_CONTENT);
         config.stickyModifierKey = prefs.getBoolean(CHECKBOX_ENABLE_STICKY_MODIFIER_KEY_VIRTUAL_KEYBOARD, DEFAULT_ENABLE_STICKY_MODIFIER_KEY_VIRTUAL_KEYBOARD);
-        config.enableAudioFx = prefs.getBoolean(ENABLE_AUDIO_FX_PREF_STRING, DEFAULT_ENABLE_AUDIO_FX);
+        config.showAudioDiagnostics = prefs.getBoolean(SHOW_AUDIO_DIAGNOSTICS_PREF_STRING, false);
+        config.forceAndroidLowLatency = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                prefs.getBoolean(FORCE_ANDROID_LOW_LATENCY_PREF_STRING, false);
+        config.enableAudioFx = !config.forceAndroidLowLatency &&
+                prefs.getBoolean(ENABLE_AUDIO_FX_PREF_STRING, DEFAULT_ENABLE_AUDIO_FX);
+        try {
+            config.lowLatencyAudioBufferMs = Integer.parseInt(
+                    prefs.getString(LOW_LATENCY_AUDIO_BUFFER_PREF_STRING, "0"));
+        } catch (NumberFormatException e) {
+            config.lowLatencyAudioBufferMs = 0;
+        }
+        if (config.lowLatencyAudioBufferMs != 0 &&
+                (config.lowLatencyAudioBufferMs < 8 || config.lowLatencyAudioBufferMs > 64)) {
+            config.lowLatencyAudioBufferMs = 0;
+        }
         config.reduceRefreshRate = prefs.getBoolean(REDUCE_REFRESH_RATE_PREF_STRING, DEFAULT_REDUCE_REFRESH_RATE);
         config.fullRange = prefs.getBoolean(FULL_RANGE_PREF_STRING, DEFAULT_FULL_RANGE);
         config.gamepadTouchpadAsMouse = prefs.getBoolean(GAMEPAD_TOUCHPAD_AS_MOUSE_PREF_STRING, DEFAULT_GAMEPAD_TOUCHPAD_AS_MOUSE);
